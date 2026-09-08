@@ -1,0 +1,200 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MapMap</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:sans-serif;color:#fff}
+  #globeViz{width:100vw;height:100vh;cursor:crosshair}
+  #top{position:fixed;top:18px;left:50%;transform:translateX(-50%);text-align:center;z-index:10;pointer-events:none;width:92%}
+  #locName{font-size:30px;font-weight:bold;text-shadow:0 0 8px #000}
+  #locCat{font-size:14px;opacity:.7;margin-top:2px}
+  #hint{font-size:13px;opacity:.6;margin-top:6px;min-height:16px}
+  #score{position:fixed;top:18px;right:20px;z-index:10;font-size:14px;text-align:right;text-shadow:0 0 8px #000}
+  #bottom{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);text-align:center;z-index:10}
+  #result{font-size:18px;margin-bottom:10px;text-shadow:0 0 8px #000;min-height:22px;pointer-events:none}
+  #btn{font-size:16px;padding:10px 26px;border:none;border-radius:6px;background:#2d7dfc;color:#fff;cursor:pointer}
+  #btn:hover{background:#1b5fd6}
+  #btn:disabled{opacity:.4;cursor:default}
+
+  #menu{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)}
+  #menu[hidden]{display:none}
+  #menuBody{background:#111;border:1px solid #333;border-radius:10px;padding:24px 28px;max-width:540px;max-height:84vh;overflow-y:auto;text-align:center}
+  #menuBody h2{margin:.2em 0 .4em}
+  #menuBody p{opacity:.75;font-size:14px;line-height:1.5;margin:0 0 14px}
+  #menuBody button{font-size:15px;padding:9px 20px;margin:6px;border:none;border-radius:6px;background:#2d7dfc;color:#fff;cursor:pointer}
+  #menuBody button:hover{background:#1b5fd6}
+  ol.results{text-align:left;margin:18px 0 0;padding:0;list-style:none;font-size:13px}
+  ol.results li{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-top:1px solid #222}
+  ol.results .rk{opacity:.45;min-width:28px}
+  ol.results .cat{opacity:.45;font-size:11px}
+  ol.results .d{margin-left:auto;white-space:nowrap;opacity:.85}
+</style>
+</head>
+<body>
+<div id="top">
+  <div id="locName"></div>
+  <div id="locCat"></div>
+  <div id="hint"></div>
+</div>
+<div id="score"></div>
+<div id="bottom">
+  <div id="result"></div>
+  <button id="btn" hidden>Next</button>
+</div>
+<div id="menu"><div id="menuBody"></div></div>
+<div id="globeViz"></div>
+
+<script src="https://unpkg.com/globe.gl"></script>
+<script src="locations.js"></script>
+<script>
+const SCALE_KM = 2000; // ponytail: exp scoring falloff knob; lower = harsher
+const el = id => document.getElementById(id);
+
+const world = Globe()(el('globeViz'))
+  // slippy tiles: resolution scales with zoom, so close-up clicks land where you mean them
+  .globeTileEngineUrl((x, y, l) =>
+    `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${l}/${y}/${x}`)
+  .globeTileEngineMaxLevel(19)
+  .backgroundColor('#000')
+  .pointLat('lat').pointLng('lng').pointAltitude(0.02).pointRadius(0.7).pointColor('color')
+  .labelLat('lat').labelLng('lng').labelText('n').labelSize(1.4).labelDotRadius(0.35)
+  .labelColor(() => '#fff')
+  .arcColor(() => '#ffd400').arcStroke(0.5)
+  .onGlobeClick(onGuess);
+
+world.controls().minDistance = 103;   // ponytail: how far you can zoom in; lower = closer
+world.controls().zoomSpeed = 1.6;
+
+let queue = [], results = [], idx = 0, awaitingGuess = false;
+
+function greatCircleKm(a, b) {
+  const R = 6371, rad = d => d * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function sample(arr, n) {                         // Fisher-Yates; n=0 => whole list
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return n ? a.slice(0, n) : a;
+}
+
+const totalPts = () => results.reduce((s, r) => s + r.pts, 0);
+
+function showMenu(html) {
+  el('menuBody').innerHTML = html;
+  el('menu').hidden = false;
+}
+
+function startGame(n) {
+  queue = sample(LOCATIONS, n);
+  results = [];
+  idx = 0;
+  el('menu').hidden = true;
+  el('btn').hidden = false;
+  nextRound();
+}
+
+function nextRound() {
+  awaitingGuess = true;
+  const target = queue[idx];
+  el('locName').textContent = target.n;
+  el('locCat').textContent = target.c;
+  el('hint').textContent = 'Click the globe where you think it is';
+  el('result').textContent = '';
+  el('btn').disabled = true;
+  el('btn').textContent = idx + 1 < queue.length ? 'Next' : 'See results';
+  el('score').textContent = `${idx + 1} / ${queue.length}` +
+    (results.length ? ` · ${totalPts()} pts` : '');
+  world.pointsData([]).labelsData([]).arcsData([]);
+}
+
+function onGuess({ lat, lng }) {
+  if (!awaitingGuess) return;
+  awaitingGuess = false;
+
+  const target = queue[idx];
+  const dist = greatCircleKm({ lat, lng }, target);
+  const pts = Math.round(100 * Math.exp(-dist / SCALE_KM));
+  results.push({ loc: target, dist, pts });
+
+  el('result').innerHTML =
+    `${Math.round(dist).toLocaleString()} km away &mdash; <b>${pts}</b> / 100`;
+  el('score').textContent = `${idx + 1} / ${queue.length} · ${totalPts()} pts`;
+  el('hint').textContent = `${target.n} is the red marker`;
+  el('btn').disabled = false;
+
+  world.pointsData([
+    { lat, lng, color: '#33c3ff' },
+    { lat: target.lat, lng: target.lng, color: '#ff3b30' }
+  ]).labelsData([target]).arcsData([
+    { startLat: lat, startLng: lng, endLat: target.lat, endLng: target.lng }
+  ]);
+  world.pointOfView({
+    lat: (lat + target.lat) / 2,
+    lng: (lng + target.lng) / 2,
+    altitude: Math.min(2.5, Math.max(0.6, dist / 4000))
+  }, 1200);
+}
+
+function advance() {
+  if (++idx < queue.length) nextRound();
+  else endGame();
+}
+
+function endGame() {
+  el('btn').hidden = true;
+  el('score').textContent = '';
+  el('locName').textContent = '';
+  el('locCat').textContent = '';
+  el('hint').textContent = '';
+  el('result').textContent = '';
+  world.pointsData([]).labelsData([]).arcsData([]);
+
+  const rows = [...results].sort((a, b) => a.dist - b.dist).map((r, i) =>
+    `<li><span class="rk">${i + 1}</span>${r.loc.n}` +
+    `<span class="cat">${r.loc.c}</span>` +
+    `<span class="d">${Math.round(r.dist).toLocaleString()} km &middot; ${r.pts}</span></li>`).join('');
+
+  showMenu(
+    `<h2>Done &mdash; ${totalPts().toLocaleString()} / ${(queue.length * 100).toLocaleString()} pts</h2>` +
+    `<button data-n="10">Play 10 more</button>` +
+    `<button data-n="0">Play all ${LOCATIONS.length}</button>` +
+    `<ol class="results">${rows}</ol>`);
+}
+
+el('btn').onclick = advance;
+addEventListener('keydown', e => {
+  if ((e.code === 'Space' || e.code === 'Enter') && !el('btn').hidden && !el('btn').disabled) {
+    e.preventDefault();
+    advance();
+  }
+});
+
+el('menuBody').onclick = e => {
+  const n = e.target.dataset.n;
+  if (n !== undefined) startGame(+n);
+};
+
+showMenu(
+  `<h2>MapMap</h2>` +
+  `<p>You're given a place. Click the globe where you think it is &mdash; ` +
+  `you score 0&ndash;100 each round by how close your click lands.</p>` +
+  `<button data-n="10">10 Random</button>` +
+  `<button data-n="0">All ${LOCATIONS.length}</button>`);
+
+// self-check: haversine, scoring, sampling
+console.assert(greatCircleKm({ lat: 0, lng: 0 }, { lat: 0, lng: 0 }) < 1, 'zero distance');
+console.assert(Math.abs(greatCircleKm({ lat: 0, lng: 0 }, { lat: 0, lng: 90 }) - 10007) < 50, 'quarter circumference');
+console.assert(Math.round(100 * Math.exp(0)) === 100, 'perfect guess scores 100');
+console.assert(sample(LOCATIONS, 10).length === 10, 'sample of 10');
+console.assert(sample(LOCATIONS, 0).length === LOCATIONS.length, 'sample of 0 = all');
+</script>
+</body>
+</html>
