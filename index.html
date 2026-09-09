@@ -183,9 +183,11 @@ el('menuBody').onclick = e => {
 };
 
 showMenu(
-  `<h2>MapMap</h2>` +
+  `<h2>MapMap - Study aid for Geog350</h2>` +
   `<p>You're given a place. Click the globe where you think it is &mdash; ` +
   `you score 0&ndash;100 each round by how close your click lands.</p>` +
+  `<p>Note: large areas like mountain ranges, bodies of water, and rivers ` +
+  `are marked at a single point, so their location may look inaccurate.</p>` +
   `<button data-n="10">10 Random</button>` +
   `<button data-n="0">All ${LOCATIONS.length}</button>`);
 
